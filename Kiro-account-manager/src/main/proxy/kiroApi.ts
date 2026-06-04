@@ -192,8 +192,7 @@ const AGENT_MODE_VIBE = 'vibe' // CLI 模式
 import {
   KIRO_BUILDER_ID_PLACEHOLDER_ARN as _KIRO_BUILDER_ID_PLACEHOLDER_ARN,
   KIRO_SOCIAL_PROFILE_ARN,
-  isPlaceholderProfileArn as _isPlaceholderProfileArn,
-  resolveProfileArnForWrite
+  isPlaceholderProfileArn as _isPlaceholderProfileArn
 } from '../kiroAuthSync'
 
 export const KIRO_BUILDER_ID_PLACEHOLDER_ARN = _KIRO_BUILDER_ID_PLACEHOLDER_ARN
@@ -201,14 +200,18 @@ export const isPlaceholderProfileArn = _isPlaceholderProfileArn
 
 /**
  * 反代调 Kiro API 时使用的 profileArn 决策。
- * BuilderId 等"不支持 profile"的账号返回 undefined，避免 REST 端点 403。
+ * BuilderId 使用占位符 ARN，Social 使用固定 ARN。
+ * 注意：流式端点（generateAssistantResponse / SendMessageStreaming）对占位符 ARN 会 403，
+ * 需在 callKiroApiStream 中额外剥离。
  */
 function resolveProfileArn(account: ProxyAccount): string | undefined {
-  return resolveProfileArnForWrite({
-    profileArn: account.profileArn,
-    authMethod: account.authMethod,
-    provider: account.provider
-  })
+  if (account.profileArn && !isPlaceholderProfileArn(account.profileArn)) {
+    return account.profileArn
+  }
+  if (account.authMethod === 'social' || account.provider === 'Github' || account.provider === 'Google') {
+    return KIRO_SOCIAL_PROFILE_ARN
+  }
+  return KIRO_BUILDER_ID_PLACEHOLDER_ARN
 }
 
 // 兼容 SDK 部分调用仍想知道社交 ARN 的场景（极少；保留 export 不破坏外部 import）
@@ -1221,8 +1224,9 @@ export async function callKiroApiStream(
     try {
       throwIfAborted(signal)
       const requestPayload = clonePayload(payload)
+      // 流式端点对 BuilderId 占位符 ARN 返回 403，仅传真实 ARN 或 Social ARN
       const resolvedArn = resolveProfileArn(account)
-      if (resolvedArn) {
+      if (resolvedArn && !isPlaceholderProfileArn(resolvedArn)) {
         requestPayload.profileArn = resolvedArn
       } else {
         delete requestPayload.profileArn
@@ -1982,7 +1986,6 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
   try {
     do {
       const params = new URLSearchParams({ origin: 'AI_EDITOR', maxResults: '50' })
-      // BuilderId 等账号不携带 profileArn，避免 AWS 后端对占位符 ARN 返回 403
       const arnForModels = resolveProfileArn(account)
       if (arnForModels) params.set('profileArn', arnForModels)
       if (nextToken) params.set('nextToken', nextToken)
@@ -2061,7 +2064,6 @@ export async function fetchAvailableSubscriptions(account: ProxyAccount): Promis
   }
 
   const profileArn = resolveProfileArn(account)
-  // BuilderId 不带 profileArn；带空/占位符会被 AWS 后端拒绝
   const body = JSON.stringify(profileArn ? { profileArn } : {})
 
   console.log(`[KiroAPI] ListAvailableSubscriptions [${account.email || account.id.slice(0, 8)}]`, {

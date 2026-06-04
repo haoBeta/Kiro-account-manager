@@ -272,6 +272,36 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ## 📋 Changelog
 
 
+### v1.7.4 (2026-6-5) — profileArn Refined Strategy + CI Fix + Log Redaction Fix + Registration Anti-Hang
+
+#### 🛡️ profileArn Strategy Refinement
+
+- **Fix**: Restored `resolveProfileArnForWrite` to return placeholder ARN for BuilderId — Kiro IDE internal logic depends on this field existing; removing it caused IDE malfunction
+- **Fix**: Non-streaming API endpoints (`ListAvailableModels`, `ListAvailableSubscriptions`, `CreateSubscriptionToken`, `setUserPreference`) now send placeholder ARN again (AWS 400 "profileArn must not be null")
+- **Fix**: Streaming endpoints (`generateAssistantResponse` / `SendMessageStreaming`) still do NOT send placeholder ARN (causes 403)
+- **Fix**: Disabled `migrateAccountDataIfNeeded` cleanup of placeholder ARNs from account data
+
+#### 🔧 GitHub Actions CI Fix
+
+- **Fix**: `softprops/action-gh-release@v1` uploading duplicate filenames causing 404 — replaced with `find + cp` flatten-and-dedup to `release-assets/` directory before upload
+- **New**: Added `yaml-language-server` schema declaration to suppress IDE YAML lint false-positives
+
+#### 📝 Log Redaction Fix
+
+- **Fix**: `inputTokens`, `outputTokens`, `cacheReadTokens`, `reasoningTokens` and other metric fields were incorrectly redacted as `***` — removed overly broad `'token'` matching rule, added `SAFE_KEYS` whitelist
+
+#### 🐛 Registration Fixes
+
+- **Fix**: `Registrar.destroy()` did not call `abort()`, causing destroyed registrars to continue executing async steps (e.g. sending OTP), leading to "no registration in progress" error when submitting verification code
+- **Fix**: Outlook IMAP `readLine()` had no timeout — when the server stalls mid-stream (network jitter / throttling / half-closed connection), the Promise hung forever, causing the mail-polling step to deadlock. Added 30s timeout with auto-reconnect on next retry
+
+#### 💎 Proxy Panel UX
+
+- **Fix**: "Preferred Endpoint" dropdown obscured by the "Security & Observability" card below (z-index stacking context fix)
+- **Improvement**: Entering the proxy panel no longer triggers a full account sync on every mount; sync only fires when accounts actually change
+
+---
+
 ### v1.7.3 (2026-6-4) — Kiro IDE Token Bidirectional Sync + BuilderId Placeholder ARN Full Closure + Proactive Renewal + macOS Auto-Update Fix
 
 > This release focuses on the core failure "after switching accounts / refreshing tokens in this app, Kiro IDE desktop gets force-logged-out ~1 hour later", closes the chain of bugs where BuilderId accounts still got written placeholder profileArn in multiple paths, adds an optional IDE Token proactive-renewal capability (off by default), fixes macOS auto-update 404, and ships a Kiro IDE binary patcher script plus several UI tweaks.

@@ -16,7 +16,7 @@ import {
   type KProxyConfig,
   type DeviceIdMapping
 } from './kproxy'
-import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, isPlaceholderProfileArn, KIRO_BUILDER_ID_PLACEHOLDER_ARN } from './proxy/kiroApi'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi } from './proxy/kiroApi'
 import {
   writeKiroAuthTokenFile,
   readKiroAuthTokenFile,
@@ -1722,12 +1722,9 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
 }
 
 /**
- * 账号数据迁移：清理由旧版本反代 / Kiro IDE 桌面端写入的无效 profileArn 占位符
- * （BuilderId 的 profile/AAAACCCCXXXX 等）。带占位符 ARN 调用 AWS REST 端点
- * 会触发 403 "User is not authorized to make this call."。
- *
- * 迁移是幂等的：完成后写入 `accountDataMigration.builderIdArn = 1` 标记，
- * 后续启动会直接跳过。检测到新脏数据（外部导入等）时会再次扫描。
+ * 账号数据迁移（已停用）：曾用于清理 profileArn 占位符，
+ * 但 Kiro IDE 内部逻辑依赖该字段存在，移除后导致严重问题，已回退。
+ * 保留函数壳和标记写入，防止旧版本回滚时重复执行。
  */
 function migrateAccountDataIfNeeded(): void {
   if (!store) return
@@ -1746,24 +1743,8 @@ function migrateAccountDataIfNeeded(): void {
     return
   }
 
-  const accounts = accountData.accounts
-  let cleanedCount = 0
-  for (const id of Object.keys(accounts)) {
-    const acc = accounts[id]
-    if (!acc) continue
-    if (acc.profileArn && isPlaceholderProfileArn(acc.profileArn)) {
-      delete acc.profileArn
-      cleanedCount++
-      console.warn(
-        `[Migration] Cleared placeholder profileArn for account ${acc.email || acc.id || id} (was: ${KIRO_BUILDER_ID_PLACEHOLDER_ARN})`
-      )
-    }
-  }
-
-  if (cleanedCount > 0) {
-    store.set('accountData', accountData)
-    console.log(`[Migration] Cleaned placeholder profileArn from ${cleanedCount} account(s)`)
-  }
+  // profileArn 占位符不再清理 —— Kiro IDE 内部逻辑依赖该字段存在
+  // 保留迁移标记写入以避免旧版本回滚时重复执行
 
   if (!migrationState[FLAG]) {
     store.set(MIGRATION_KEY, { ...migrationState, [FLAG]: 1 })

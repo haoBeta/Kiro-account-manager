@@ -272,6 +272,36 @@ npx electron-builder --linux --arm64
 ## 📋 更新日志
 
 
+### v1.7.4 (2026-6-5) — profileArn 精细化策略 + CI 修复 + 日志脱敏修正 + 注册流程防悬挂
+
+#### 🛡️ profileArn 策略精细化
+
+- **修复**: 恢复 `resolveProfileArnForWrite` 为 BuilderId 返回占位符 ARN — Kiro IDE 内部逻辑依赖 `profileArn` 字段存在，移除后导致 IDE 功能异常
+- **修复**: 非流式 API 端点（`ListAvailableModels`、`ListAvailableSubscriptions`、`CreateSubscriptionToken`、`setUserPreference`）恢复发送占位符 ARN（AWS 400 "profileArn must not be null"）
+- **修复**: 流式端点（`generateAssistantResponse` / `SendMessageStreaming`）仍不发送占位符 ARN（会 403）
+- **修复**: 停用 `migrateAccountDataIfNeeded` 对占位符 ARN 的清理逻辑
+
+#### 🔧 GitHub Actions CI 修复
+
+- **修复**: `softprops/action-gh-release@v1` 上传重复文件名 asset 导致 404 — 改用 `find + cp` 扁平化去重到 `release-assets/` 目录后再上传
+- **新增**: 添加 `yaml-language-server` schema 声明消除 IDE YAML lint 误报
+
+#### 📝 日志脱敏修正
+
+- **修复**: `inputTokens`、`outputTokens`、`cacheReadTokens`、`reasoningTokens` 等计量字段被误判为敏感信息打 `***` — 移除泛化的 `'token'` 匹配规则，添加 `SAFE_KEYS` 白名单
+
+#### 🐛 注册流程修复
+
+- **修复**: `Registrar.destroy()` 未调用 `abort()` 导致已销毁的注册器继续异步执行后续步骤（如发送 OTP），用户提交验证码时报"无进行中的注册流程"
+- **修复**: Outlook IMAP `readLine()` 无超时保护 — 服务器中途卡住（网络抖动/限流/半关闭连接）时 Promise 永远挂起，导致收信环节卡死。现加 30s 超时，超时后自动关闭连接并重试
+
+#### 💎 反代页面 UX
+
+- **修复**: "首选端点"下拉框被"安全与可观测设置"卡片遮挡（z-index 层叠上下文修复）
+- **优化**: 进入反代页面不再自动触发全量账号同步，仅在账号真正增删时才同步
+
+---
+
 ### v1.7.3 (2026-6-4) — Kiro IDE Token 双向同步 + BuilderId 占位符 ARN 闭环修复 + 主动续期 + macOS 自动更新修复
 
 > 本版本聚焦解决"通过本工具切号 / 刷新 Token 后，Kiro IDE 桌面端约 1 小时后被强制登出"的核心故障，闭环修掉 BuilderId 账号在多处仍被写入占位符 profileArn 的连环 bug，新增可选的 IDE Token 主动续期能力（默认关闭），修复 macOS 自动更新 404，附带 Kiro IDE 二进制补丁器脚本与若干 UI 细节调整。

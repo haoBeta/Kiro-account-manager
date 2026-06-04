@@ -33,9 +33,8 @@ const KIRO_OIDC_SCOPES = [
 
 // =============== profileArn 决策中心 ===============
 //
-// 占位符 ARN：Kiro IDE 源码 FixedProfileArns 里给 BuilderId 硬编码的 fake 值。
-// 实测对 codewhisperer.us-east-1.amazonaws.com REST 端点会 403 "User is not authorized"。
-// AWS Builder ID 不支持 profile 概念，请求应当完全不带 profileArn。
+// 占位符 ARN：Kiro IDE 源码 FixedProfileArns 里给 BuilderId 硬编码的值。
+// Kiro IDE 内部逻辑依赖该字段存在，移除会导致 IDE 功能异常。
 export const KIRO_BUILDER_ID_PLACEHOLDER_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
 // Social 登录（Github/Google）共用的 Kiro 后端固定 profileArn
 export const KIRO_SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
@@ -54,9 +53,7 @@ export function isPlaceholderProfileArn(arn: string | undefined | null): boolean
  * 规则（优先级）：
  *   1. 调用方显式给出 profileArn 且非已知占位符 → 直接用
  *   2. social/Github/Google → 用固定 Kiro Social profileArn
- *   3. 其它（BuilderId、Enterprise、Internal、未知）→ undefined，不带 profileArn
- *
- * BuilderId 等账号绝不能带占位符 ARN，否则 IDE 后续 REST 调用会 403。
+ *   3. BuilderId / 其它 → 使用 Kiro IDE 官方占位符 ARN（IDE 内部逻辑依赖此字段存在）
  */
 export function resolveProfileArnForWrite(input: {
   profileArn?: string
@@ -69,7 +66,7 @@ export function resolveProfileArnForWrite(input: {
   if (input.authMethod === 'social' || input.provider === 'Github' || input.provider === 'Google') {
     return KIRO_SOCIAL_PROFILE_ARN
   }
-  return undefined
+  return KIRO_BUILDER_ID_PLACEHOLDER_ARN
 }
 
 export interface KiroAuthTokenFile {
@@ -119,11 +116,6 @@ function computeClientIdHash(startUrl?: string): string {
 export async function writeKiroAuthTokenFile(
   input: WriteKiroAuthTokenInput
 ): Promise<WriteKiroAuthTokenResult> {
-  // 最后一道防线：占位符 ARN 进来就 strip，确保 BuilderId 永远不被写入占位符
-  if (isPlaceholderProfileArn(input.profileArn)) {
-    input = { ...input, profileArn: undefined }
-  }
-
   await fs.mkdir(KIRO_SSO_CACHE_DIR, { recursive: true })
 
   const clientIdHash = computeClientIdHash(input.startUrl)
