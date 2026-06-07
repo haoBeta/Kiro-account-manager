@@ -13,9 +13,10 @@ import {
   getNestedMap, getNestedStringMap
 } from './http-utils'
 import {
-  TempEmailService, MoEmailService, TempMailPlusService, ProtonWebviewService,
+  TempEmailService, MoEmailService, TempMailPlusService, ProtonWebviewService, IcloudHmeService,
   parseOutlookLines, getInboxCount, waitForOTP
 } from './email-service'
+import { getIcloudInboxCount, waitForIcloudOtpFromBaseline } from './icloud-hme'
 import { getSystemProxy, safeCreateProxyAgent } from '../proxy/systemProxy'
 import { redactString } from '../utils/redact'
 
@@ -98,6 +99,8 @@ export class Registrar {
   private wdcCSRFToken = ''
   private ssoToken = ''
   private outlookMailCount = 0
+  /** iCloud HME 模式下，send-otp 之前主邮箱 INBOX 的 EXISTS 基线数；wait OTP 时只看 > 基线的新邮件 */
+  private icloudBaselineCount = 0
 
   private log: LogFn
   private onStep: StepFn2
@@ -875,6 +878,27 @@ export class Registrar {
       return
     }
 
+    if (this.cfg.useIcloudHme) {
+      this.log('[3] 使用 iCloud Hide My Email')
+      if (!this.cfg.icloudHmeAddress) {
+        throw new Error('iCloud HME 地址未配置（池中无可用地址或前端未传）')
+      }
+      if (!this.cfg.icloudMainEmail || !this.cfg.icloudAppPassword) {
+        throw new Error('iCloud 主邮箱或应用专用密码未配置')
+      }
+      this.emailSvc = new IcloudHmeService(
+        this.cfg.icloudHmeAddress,
+        this.cfg.icloudMainEmail,
+        this.cfg.icloudAppPassword,
+        (m) => this.log(m)
+      )
+      this.email = await this.emailSvc.create()
+      if (!this.email) throw new Error('iCloud HME 地址为空')
+      this.emitStep('email-created')
+      this.log(`email=${this.email}`)
+      return
+    }
+
     this.log('[3] 创建临时邮箱')
     if (!this.cfg.moEmailBaseURL) throw new Error('MoEmail 未配置')
     this.emailSvc = new MoEmailService(this.cfg.moEmailBaseURL, this.cfg.moEmailAPIKey)
@@ -1119,6 +1143,19 @@ export class Registrar {
       }
     }
 
+    if (this.cfg.useIcloudHme) {
+      try {
+        this.icloudBaselineCount = await getIcloudInboxCount(
+          this.cfg.icloudMainEmail,
+          this.cfg.icloudAppPassword
+        )
+        this.log(`[iCloud IMAP] 发送前主邮箱邮件数: ${this.icloudBaselineCount}`)
+      } catch (err) {
+        this.log(`[iCloud IMAP] 获取邮件数量失败: ${err}, 基线设为 0（首次轮询会扫全量找新邮件）`)
+        this.icloudBaselineCount = 0
+      }
+    }
+
     const ref = `${this.cfg.profileBase}/?workflowID=${this.workflowId}`
     const timeOnPage = 5000 + Math.floor(Math.random() * 3001)
     const fp = this.genFPWithTime('profile', 'PageSubmit', timeOnPage, this.email.length, this.email)
@@ -1154,6 +1191,19 @@ export class Registrar {
       const acc = accounts.find((a) => a.email === this.email)
       if (!acc) throw new Error('未找到对应 Outlook 账号')
       return await waitForOTP(acc, this.outlookMailCount, 120, 5, signal)
+    }
+    if (this.cfg.useIcloudHme) {
+      // 走基线模式：只看 send-otp 之后到达的新邮件，避免拉到该 HME 收件箱里之前注册过的旧 AWS 邮件
+      return await waitForIcloudOtpFromBaseline(
+        this.cfg.icloudMainEmail,
+        this.cfg.icloudAppPassword,
+        this.cfg.icloudHmeAddress,
+        this.icloudBaselineCount,
+        120,
+        3,
+        signal,
+        (m) => this.log(m)
+      )
     }
     if (!this.emailSvc) throw new Error('邮箱服务未初始化')
     return await this.emailSvc.waitForCode(120, 3, signal)

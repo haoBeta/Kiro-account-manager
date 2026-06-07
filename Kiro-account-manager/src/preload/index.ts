@@ -455,7 +455,7 @@ const api = {
   },
 
   // ============ 自动更新 ============
-  
+
   // 检查更新 (electron-updater)
   checkForUpdates: (): Promise<{
     hasUpdate: boolean
@@ -933,7 +933,7 @@ const api = {
   },
 
   // ============ API Key 管理 ============
-  
+
   // 获取所有 API Keys
   proxyGetApiKeys: (): Promise<{ success: boolean; apiKeys: Array<{ id: string; name: string; key: string; enabled: boolean; createdAt: number; lastUsedAt?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }>; error?: string }> => {
     return ipcRenderer.invoke('proxy-get-api-keys')
@@ -1049,7 +1049,7 @@ const api = {
   getShowWindowShortcut: (): Promise<string> => ipcRenderer.invoke('get-show-window-shortcut'),
 
   // 设置显示主窗口快捷键
-  setShowWindowShortcut: (shortcut: string): Promise<{ success: boolean; error?: string }> => 
+  setShowWindowShortcut: (shortcut: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('set-show-window-shortcut', shortcut),
 
   // 获取托盘设置
@@ -1165,6 +1165,8 @@ const api = {
     tempMailPlusDomain?: string
     useProton?: boolean
     protonEmail?: string
+    useIcloudHme?: boolean
+    icloudHmeAddress?: string
     password?: string
     fullName?: string
     taskId?: string
@@ -1307,6 +1309,119 @@ const api = {
   // Proton 邮箱：关闭窗口（保留登录态）
   protonClose: (): Promise<{ success: boolean }> => {
     return ipcRenderer.invoke('proton-close')
+  },
+
+  // ============ iCloud Hide My Email ============
+
+  /** 保存 iCloud 凭据（cookie / 主邮箱 / 应用专用密码）。字段未传时不覆盖 */
+  icloudHmeSaveCreds: (input: {
+    cookie?: string
+    mainEmail?: string
+    appPassword?: string
+    defaultLabel?: string
+    defaultNote?: string
+  }): Promise<{
+    success: boolean
+    redacted: { hasCookie: boolean; cookiePreview: string; hasAppPassword: boolean; mainEmail: string; defaultLabel: string; defaultNote: string }
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('icloud-hme-save-creds', input)
+  },
+
+  /** 读取 iCloud 凭据脱敏视图（cookie/密码不返回明文） */
+  icloudHmeGetCreds: (): Promise<{
+    hasCookie: boolean
+    cookiePreview: string
+    hasAppPassword: boolean
+    mainEmail: string
+    defaultLabel: string
+    defaultNote: string
+  }> => {
+    return ipcRenderer.invoke('icloud-hme-get-creds')
+  },
+
+  /** 测 cookie：调一次 list 看是否能拿到现有 HME 列表 */
+  icloudHmeTestCookie: (): Promise<{ success: boolean; existingCount?: number; error?: string }> => {
+    return ipcRenderer.invoke('icloud-hme-test-cookie')
+  },
+
+  /** 测 IMAP：登录 + SELECT INBOX */
+  icloudHmeTestImap: (): Promise<{ success: boolean; mailboxCount?: number; error?: string }> => {
+    return ipcRenderer.invoke('icloud-hme-test-imap')
+  },
+
+  /** 把 Apple 上现有的 HME 列表同步入池（用于"我之前手动建过的也算" */
+  icloudHmeSyncFromApple: (): Promise<{ success: boolean; added?: number; total?: number; error?: string }> => {
+    return ipcRenderer.invoke('icloud-hme-sync-from-apple')
+  },
+
+  /** 批量生成 HME（generate + reserve），失败立即停以保护配额 */
+  icloudHmeGenerate: (input: { count: number; label?: string; concurrency?: number }): Promise<{
+    success: boolean
+    generated: string[]
+    failed: number
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('icloud-hme-generate', input)
+  },
+
+  /** 导入文本中的 HME 地址（每行一个） */
+  icloudHmeImport: (input: { text: string; label?: string }): Promise<{
+    success: boolean
+    added: number
+    ignored: number
+    total: number
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('icloud-hme-import', input)
+  },
+
+  /** 取池子完整列表 + 统计 */
+  icloudHmeListPool: (): Promise<{
+    stats: { total: number; free: number; consumed: number; failed: number }
+    entries: Array<{
+      address: string
+      source: 'generated' | 'imported'
+      status: 'free' | 'consumed' | 'failed'
+      anonymousId?: string
+      label?: string
+      createdAt: number
+      updatedAt: number
+      consumedBy?: string
+      error?: string
+    }>
+  }> => {
+    return ipcRenderer.invoke('icloud-hme-list-pool')
+  },
+
+  /** 批量原子分配 N 个 free 地址，立即标 consumed */
+  icloudHmeCheckout: (input: { count: number; consumedBy?: string }): Promise<{ addresses: string[] }> => {
+    return ipcRenderer.invoke('icloud-hme-checkout', input)
+  },
+
+  /** 释放分配但未用上的地址（取消批量、超额分配回退用） */
+  icloudHmeRelease: (input: { addresses: string[] }): Promise<{ released: number }> => {
+    return ipcRenderer.invoke('icloud-hme-release', input)
+  },
+
+  /** 把地址标记为 failed（注册失败时调用，避免再被分配） */
+  icloudHmeMarkFailed: (input: { address: string; error: string }): Promise<{ success: boolean }> => {
+    return ipcRenderer.invoke('icloud-hme-mark-failed', input)
+  },
+
+  /** 把所有 failed 重置为 free（人工救援） */
+  icloudHmeResetFailed: (): Promise<{ count: number }> => {
+    return ipcRenderer.invoke('icloud-hme-reset-failed')
+  },
+
+  /** 删除地址（仅本地） */
+  icloudHmeRemove: (input: { addresses: string[] }): Promise<{ removed: number }> => {
+    return ipcRenderer.invoke('icloud-hme-remove', input)
+  },
+
+  /** 整池清空 */
+  icloudHmeClear: (): Promise<{ success: boolean }> => {
+    return ipcRenderer.invoke('icloud-hme-clear')
   },
 
   // 监听注册日志
