@@ -139,6 +139,28 @@ npm run typecheck
 
 ## 📋 Changelog
 
+### v1.7.5-icloud.1 (2026-6-7) — iCloud Hide My Email registration mode
+
+> **Fork note**: Based on upstream v1.7.5, with iCloud HME batch registration integrated. Version format `<upstream>-icloud.<iter>` keeps tags from colliding with upstream.
+
+#### 🆕 iCloud HME integration (4th email source)
+
+- **New**: Batch register via iCloud+ Hide My Email — each account uses a unique real HME address (@icloud.com / @me.com); AWS verification mail is forwarded by Apple to your primary mailbox, then read directly over IMAP to auto-complete registration
+- **New**: Built-in Apple HME API client (`generate` / `reserve` / `list` / `deactivate`) authenticated by iCloud Web cookie; minimal IMAP4rev1 subset over raw `node:tls`, no extra native deps
+- **New**: HME address pool — `electron-store` encrypted (separate store + separate key), single-chain mutex prevents concurrent batches from grabbing the same address; states `free → consumed | failed`
+- **New**: New **iCloud HME** mode tab on the registration page, with a config card holding cookie paste box, primary email, app-specific password, save / test buttons, pool stats (free/consumed/failed), generate N, sync from Apple, text import, reset failed, clear pool
+- **New**: Credential isolation — cookie / primary email / app-specific password encrypted in the main process; UI only sees a redacted view; `registration-start-auto` IPC handler auto-injects IMAP credentials so the renderer never holds plaintext
+
+#### 🐛 OTP extraction robustness
+
+- **New**: Proper multipart MIME parsing — boundary prefers message-level `Content-Type` (AWS boundaries like `----=_Part_xxxx` confuse body-line heuristics), each part decoded by its own transfer-encoding
+- **New**: `BODY[TEXT]` fetch now also pulls `CONTENT-TYPE` / `CONTENT-TRANSFER-ENCODING` — single-part mails carry no metadata in body and need message-level headers to decode
+- **Fix**: OTP regex now picks the **first** match, not the last (last-match used to grab CSS pixel sizes / phone numbers / copyright years); text/html stripped tag-by-tag with whitespace replacement (so adjacent `<span>` numbers don't fuse into a fake 6-digit code); keyword regex now covers Chinese `验证码：` (AWS sends Chinese mail to iCloud mailboxes from CN IPs)
+- **New**: Baseline mode — record INBOX `EXISTS` before send-otp, only scan `baseline+1..current` afterwards; avoids picking up stale AWS verification mails the HME address received in prior registrations (HME is a real reusable address; recipient-only matching would catch old codes → INVALID_OTP)
+- **New**: iCloud mode does not retry — re-submitting the same OTP under a new workflow is guaranteed to fail and only burns HME quota; unused pre-checked-out addresses are auto-released on batch end / cancel
+
+---
+
 ### v1.7.0 (Current)
 
 #### 🔥 Major Features (4 phases, 19 new features)

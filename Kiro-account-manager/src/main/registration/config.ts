@@ -42,6 +42,13 @@ export interface RegistrationConfig {
   useProton: boolean
   protonEmail: string // 本次注册使用的 Proton 邮箱地址（母邮箱或其点号变体，由前端生成）
 
+  // iCloud Hide My Email（每号一个独立 HME 地址，IMAP 取码）
+  // 地址池由前端预 checkout 后塞进 icloudHmeAddress；主邮箱与应用专用密码由 ipc 层从 store 读出注入
+  useIcloudHme: boolean
+  icloudHmeAddress: string  // 本次注册使用的 HME 地址
+  icloudMainEmail: string   // iCloud 主邮箱（IMAP 用户名）
+  icloudAppPassword: string // 应用专用密码（IMAP 密码）
+
   // 手动模式
   manualMode: boolean
 }
@@ -90,6 +97,10 @@ export function newConfig(overrides?: Partial<RegistrationConfig>): Registration
     tempMailPlusDomain: '',
     useProton: false,
     protonEmail: '',
+    useIcloudHme: false,
+    icloudHmeAddress: '',
+    icloudMainEmail: '',
+    icloudAppPassword: '',
     manualMode: false,
     ...overrides
   }

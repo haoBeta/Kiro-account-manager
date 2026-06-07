@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { Registrar, newConfig, type RegistrationConfig } from './index'
+import { Registrar, newConfig, getIcloudHmeCreds, type RegistrationConfig } from './index'
 import type { RegStepEvent } from './registrar'
 import { openProtonLogin, getProtonLoginStatus, closeProtonWindow } from './proton-mail-window'
 
@@ -29,6 +29,13 @@ export function registerIPCHandlers(getMainWindow: () => BrowserWindow | null): 
 
     const cfg = newConfig(config)
     cfg.manualMode = false
+    // iCloud HME 模式：自动从加密 store 注入 IMAP 凭据（cookie 不需要——cookie 只在 generate/reserve 池阶段用，
+    // 注册流程只用 IMAP）。前端永远不持有这两个明文，安全性等同于 store 加密强度。
+    if (cfg.useIcloudHme) {
+      const creds = await getIcloudHmeCreds()
+      cfg.icloudMainEmail = creds.mainEmail
+      cfg.icloudAppPassword = creds.appPassword
+    }
     const registrar = new Registrar(
       cfg,
       (msg) => sendLog(`${logPrefix}${msg}`, config.taskId),

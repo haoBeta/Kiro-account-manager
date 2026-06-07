@@ -3,6 +3,7 @@ import { fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'und
 import { getSystemProxy, safeCreateProxyAgent } from '../proxy/systemProxy'
 import { randomEmailPrefix } from './names'
 import { waitProtonOtp } from './proton-mail-window'
+import { findOtpInIcloudInbox } from './icloud-hme'
 
 function getRegistrationProxyUrl(): string | undefined {
   return process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || getSystemProxy() || undefined
@@ -644,6 +645,78 @@ export class ProtonWebviewService implements TempEmailService {
       signal,
       log: this.log
     })
+  }
+}
+
+// ============ iCloud Hide My Email ============
+
+/**
+ * iCloud HME 取码服务：
+ *   - create() 不主动生成新地址，本服务只消费"已经从池子里 checkout 出来的"地址；
+ *     这样保持与 ProtonWebviewService 一致的契约（地址由前端预先决定），
+ *     生成与池管理由 ipc/icloudHme.ts 单独负责。
+ *   - waitForCode() 通过 IMAP 轮询 iCloud 主邮箱，按 To/Delivered-To/X-Original-To 头
+ *     匹配当前 HME 地址，定位 AWS 那封验证码邮件；不删邮件、不标已读。
+ */
+export class IcloudHmeService implements TempEmailService {
+  private readonly address: string
+  private readonly mainEmail: string
+  private readonly appPassword: string
+  private readonly log: (msg: string) => void
+
+  constructor(
+    presetAddress: string,
+    mainEmail: string,
+    appPassword: string,
+    log?: (msg: string) => void
+  ) {
+    this.address = (presetAddress || '').trim().toLowerCase()
+    this.mainEmail = (mainEmail || '').trim()
+    this.appPassword = (appPassword || '').trim()
+    if (!this.address) throw new Error('iCloud HME 地址为空（池中无可用地址或前端未传）')
+    if (!this.mainEmail) throw new Error('iCloud 主邮箱未配置')
+    if (!this.appPassword) throw new Error('iCloud 应用专用密码未配置')
+    this.log = log || ((m) => console.log(m))
+  }
+
+  async create(): Promise<string> {
+    this.log(`[iCloud HME] 使用地址: ${this.address}`)
+    return this.address
+  }
+
+  getAddress(): string {
+    return this.address
+  }
+
+  async waitForCode(timeoutSec: number, intervalSec: number, signal?: AbortSignal): Promise<string> {
+    const maxRetries = Math.max(1, Math.floor(timeoutSec / Math.max(1, intervalSec)))
+    let lastErr: unknown = null
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (signal?.aborted) throw new Error('注册已取消')
+      // 第一次发送验证码到投递回主邮箱通常 5-15s，先等一轮再查
+      await abortableSleep(intervalSec * 1000, signal)
+      try {
+        // 看最近 30 分钟内的邮件；IMAP SEARCH SINCE 粒度只能精确到天，函数内部已加一天 buffer
+        const code = await findOtpInIcloudInbox(
+          this.mainEmail,
+          this.appPassword,
+          this.address,
+          30,
+          signal,
+          this.log
+        )
+        if (code) return code
+      } catch (err) {
+        lastErr = err
+        if (attempt % 5 === 0) this.log(`[iCloud HME] [${attempt}/${maxRetries}] 查询失败: ${err}`)
+      }
+      if (attempt % 5 === 0) this.log(`[iCloud HME] [${attempt}/${maxRetries}] 暂无验证码...`)
+    }
+    throw new Error(
+      lastErr
+        ? `等待验证码超时 (${timeoutSec}s)，最后一次错误: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`
+        : `等待验证码超时 (${timeoutSec}s)`
+    )
   }
 }
 

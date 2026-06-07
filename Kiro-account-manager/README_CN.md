@@ -139,6 +139,28 @@ npm run typecheck
 
 ## 📋 更新日志
 
+### v1.7.5-icloud.1 (2026-6-7) — iCloud Hide My Email 注册模式
+
+> **Fork 版本说明**：基于上游 v1.7.5，附加 iCloud HME 批量注册集成。版本号采用 `<上游版本>-icloud.<迭代号>` 格式以避免与上游 tag 冲突。
+
+#### 🆕 iCloud HME 集成（注册页第 4 种邮箱源）
+
+- **新增**: 通过 iCloud+ 的 Hide My Email 功能批量注册 — 每个账号使用一个独立的真实 HME 地址（@icloud.com / @me.com），AWS 验证邮件经 Apple 转发到主邮箱，IMAP 直连 iCloud 拉码自动完成注册
+- **新增**: 内置 Apple HME API（`generate` / `reserve` / `list` / `deactivate`），用 iCloud Web cookie 鉴权；裸 `node:tls` 实现 IMAP4rev1 子集，不引入额外原生依赖
+- **新增**: HME 地址池管理 — `electron-store` 加密持久化（独立 store + 独立 key），单链 mutex 保证批量并发分配不会撞同一个地址；状态机 `free → consumed | failed`
+- **新增**: 注册页 mode tab 增加 **iCloud HME** 选项，配置卡片含 cookie 粘贴框、主邮箱、应用专用密码、保存/测连按钮、池统计行（free/consumed/failed）、生成 N 个、从 Apple 同步、文本导入、重置失败、清空池
+- **新增**: 凭据隔离 — cookie / 主邮箱 / 应用专用密码加密保存于主进程，UI 仅展示脱敏视图；`registration-start-auto` IPC handler 自动从 store 注入 IMAP 凭据，前端永远不持有明文
+
+#### 🐛 取码鲁棒性
+
+- **新增**: multipart MIME 解析 — boundary 优先从 message-level Content-Type 头取（AWS 邮件 boundary 形如 `----=_Part_xxxx`，body 启发式会被开头多个 `-` 干扰），按 part 拆分后按各 part 自己的 transfer-encoding 解码
+- **新增**: `BODY[TEXT]` 同时拉 `CONTENT-TYPE` / `CONTENT-TRANSFER-ENCODING` 头 — 单段邮件必须用 message-level 头才能正确解码
+- **修复**: OTP 提取改为"取第一个匹配"（原"取最后一个"会拉到 CSS 像素 / 客服电话 / 版权年份等噪声）；text/html 段做 HTML 标签剥离（标签换空格防止相邻数字粘连）；关键词正则覆盖中文 `验证码：`（AWS 给中国 IP 的 iCloud 邮箱投递的是中文邮件）
+- **新增**: 基线模式取码 — `step9SendOTP` 之前记 INBOX EXISTS 数，等待时只扫 baseline+1 之后的新邮件，避免该 HME 地址此前注册过的旧 AWS 邮件污染（HME 是真实可复用地址，按收件人匹配会拉到旧码 → INVALID_OTP）
+- **新增**: iCloud 模式不重试 — 同地址重提 OTP 必失败，仅浪费 HME 配额；批量结束 / 中止时自动 release 未使用的预 checkout 地址
+
+---
+
 ### v1.7.0（当前版本）
 
 #### 🔥 重大功能（4 期累计 19 项新功能）

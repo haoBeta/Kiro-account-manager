@@ -101,7 +101,7 @@ interface StatusResult {
     userStatus?: string // 用户状态：Active 等
     featureFlags?: string[] // 特性开关
     subscriptionTitle?: string
-    usage?: { 
+    usage?: {
       current: number
       limit: number
       percentUsed: number
@@ -115,7 +115,7 @@ interface StatusResult {
       nextResetDate?: string
       resourceDetail?: ResourceDetail
     }
-    subscription?: { 
+    subscription?: {
       type: string
       title?: string
       rawType?: string
@@ -145,7 +145,7 @@ interface KiroApi {
   saveAccounts: (data: AccountData) => Promise<void>
   refreshAccountToken: (account: unknown) => Promise<RefreshResult>
   checkAccountStatus: (account: unknown) => Promise<StatusResult>
-  
+
   // 后台批量刷新（主进程执行，不阻塞 UI）
   backgroundBatchRefresh: (accounts: Array<{
     id: string
@@ -165,7 +165,7 @@ interface KiroApi {
   }>, concurrency?: number, syncInfo?: boolean) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
   onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
   onBackgroundRefreshResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
-  
+
   // 后台批量检查账号状态（不刷新 Token）
   backgroundBatchCheck: (accounts: Array<{
     id: string
@@ -183,7 +183,7 @@ interface KiroApi {
   }>, concurrency?: number) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
   onBackgroundCheckProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
   onBackgroundCheckResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
-  
+
   // 切换账号 - 写入凭证到本地 SSO 缓存
   switchAccount: (credentials: {
     accessToken: string
@@ -277,7 +277,7 @@ interface KiroApi {
         upgradeCapability?: string
         overageCapability?: string
       }
-      usage: { 
+      usage: {
         current: number
         limit: number
         baseLimit?: number
@@ -756,7 +756,7 @@ interface KiroApi {
   kproxyCheckCaCertInstalled: () => Promise<{ success: boolean; installed: boolean; error?: string }>
 
   // ============ API Key 管理 ============
-  
+
   // 获取所有 API Keys
   proxyGetApiKeys: () => Promise<{ success: boolean; apiKeys: Array<{ id: string; name: string; key: string; enabled: boolean; createdAt: number; lastUsedAt?: number; usage: { totalRequests: number; totalCredits: number; totalInputTokens: number; totalOutputTokens: number; daily: Record<string, { requests: number; credits: number; inputTokens: number; outputTokens: number }> } }>; error?: string }>
 
@@ -884,6 +884,8 @@ interface KiroApi {
     tempMailPlusDomain?: string
     useProton?: boolean
     protonEmail?: string
+    useIcloudHme?: boolean
+    icloudHmeAddress?: string
     password?: string
     fullName?: string
     taskId?: string
@@ -908,6 +910,77 @@ interface KiroApi {
   protonLoginStatus: (proxy?: string) => Promise<{ loggedIn: boolean }>
 
   protonClose: () => Promise<{ success: boolean }>
+
+  // ============ iCloud Hide My Email ============
+
+  icloudHmeSaveCreds: (input: {
+    cookie?: string
+    mainEmail?: string
+    appPassword?: string
+    defaultLabel?: string
+    defaultNote?: string
+  }) => Promise<{
+    success: boolean
+    redacted: { hasCookie: boolean; cookiePreview: string; hasAppPassword: boolean; mainEmail: string; defaultLabel: string; defaultNote: string }
+    error?: string
+  }>
+
+  icloudHmeGetCreds: () => Promise<{
+    hasCookie: boolean
+    cookiePreview: string
+    hasAppPassword: boolean
+    mainEmail: string
+    defaultLabel: string
+    defaultNote: string
+  }>
+
+  icloudHmeTestCookie: () => Promise<{ success: boolean; existingCount?: number; error?: string }>
+
+  icloudHmeTestImap: () => Promise<{ success: boolean; mailboxCount?: number; error?: string }>
+
+  icloudHmeSyncFromApple: () => Promise<{ success: boolean; added?: number; total?: number; error?: string }>
+
+  icloudHmeGenerate: (input: { count: number; label?: string; concurrency?: number }) => Promise<{
+    success: boolean
+    generated: string[]
+    failed: number
+    error?: string
+  }>
+
+  icloudHmeImport: (input: { text: string; label?: string }) => Promise<{
+    success: boolean
+    added: number
+    ignored: number
+    total: number
+    error?: string
+  }>
+
+  icloudHmeListPool: () => Promise<{
+    stats: { total: number; free: number; consumed: number; failed: number }
+    entries: Array<{
+      address: string
+      source: 'generated' | 'imported'
+      status: 'free' | 'consumed' | 'failed'
+      anonymousId?: string
+      label?: string
+      createdAt: number
+      updatedAt: number
+      consumedBy?: string
+      error?: string
+    }>
+  }>
+
+  icloudHmeCheckout: (input: { count: number; consumedBy?: string }) => Promise<{ addresses: string[] }>
+
+  icloudHmeRelease: (input: { addresses: string[] }) => Promise<{ released: number }>
+
+  icloudHmeMarkFailed: (input: { address: string; error: string }) => Promise<{ success: boolean }>
+
+  icloudHmeResetFailed: () => Promise<{ count: number }>
+
+  icloudHmeRemove: (input: { addresses: string[] }) => Promise<{ removed: number }>
+
+  icloudHmeClear: () => Promise<{ success: boolean }>
 
   // 代理池验活
   proxyPoolValidate: (params: {

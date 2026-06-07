@@ -181,7 +181,7 @@ function injectProxySession(url: string): string {
   return url
 }
 
-type RegMode = 'manual' | 'outlook' | 'tempmail' | 'proton' | 'mixed'
+type RegMode = 'manual' | 'outlook' | 'tempmail' | 'proton' | 'mixed' | 'icloud'
 type AutoEmailSource = 'outlook' | 'tempmail' | 'proton'
 /**
  * Phase 状态机：
@@ -677,6 +677,37 @@ export function RegisterPage(): React.JSX.Element {
   const setProtonLoggedIn = useCallback((v: boolean): void => { _protonLoggedIn = v; _setProtonLoggedIn(v) }, [])
   const [protonChecking, setProtonChecking] = useState(false)
 
+  // iCloud Hide My Email 状态：creds 是脱敏视图（明文 cookie / 密码不进入渲染进程内存）；
+  // pool stats 显示 free/consumed/failed；icloudHmePoolRef 是"批量启动时预 checkout 的地址队列"。
+  const [icloudCreds, setIcloudCreds] = useState<{
+    hasCookie: boolean; cookiePreview: string; hasAppPassword: boolean
+    mainEmail: string; defaultLabel: string; defaultNote: string
+  }>({ hasCookie: false, cookiePreview: '', hasAppPassword: false, mainEmail: '', defaultLabel: '', defaultNote: '' })
+  const [icloudPoolStats, setIcloudPoolStats] = useState<{ total: number; free: number; consumed: number; failed: number }>({ total: 0, free: 0, consumed: 0, failed: 0 })
+  const [icloudWorking, setIcloudWorking] = useState(false)
+  // 输入态（不持久化到 localStorage；保存按钮一次性提交到主进程 store）
+  const [icloudCookieInput, setIcloudCookieInput] = useState('')
+  const [icloudMainEmailInput, setIcloudMainEmailInput] = useState('')
+  const [icloudAppPasswordInput, setIcloudAppPasswordInput] = useState('')
+  const [icloudGenCount, setIcloudGenCount] = useState(10)
+  const [icloudImportText, setIcloudImportText] = useState('')
+  // 批量启动前一次性 checkout 的地址队列；buildAutoConfig 每次 shift() 一个
+  const icloudHmePoolRef = useRef<string[]>([])
+
+  const refreshIcloudState = useCallback(async () => {
+    try {
+      const [c, p] = await Promise.all([
+        window.api.icloudHmeGetCreds(),
+        window.api.icloudHmeListPool()
+      ])
+      setIcloudCreds(c)
+      setIcloudPoolStats(p.stats)
+      setIcloudMainEmailInput((prev) => prev || c.mainEmail || '')
+    } catch { /* ignore */ }
+  }, [])
+  // 仅首次挂载/切到 icloud 模式时拉一次最新态；输入框值不会被覆盖（OR-only）
+  useEffect(() => { void refreshIcloudState() }, [refreshIcloudState])
+
   const logContainerRef = useRef<HTMLDivElement>(null)
   const { addAccount, accounts } = useAccountsStore()
 
@@ -892,7 +923,10 @@ export function RegisterPage(): React.JSX.Element {
     _logs = []; setLogs([])
     setResult(null)
     setImported(false)
-    const modeLabel = mode === 'tempmail' ? 'TempMail.Plus' : mode === 'proton' ? 'Proton' : 'Outlook'
+    const modeLabel = mode === 'tempmail' ? 'TempMail.Plus'
+      : mode === 'proton' ? 'Proton'
+      : mode === 'icloud' ? 'iCloud HME'
+      : 'Outlook'
     addLog(t('register.logAutoStart').replace('{mode}', modeLabel))
 
     const config: Record<string, unknown> = {}
@@ -914,6 +948,27 @@ export function RegisterPage(): React.JSX.Element {
       config.useProton = true
       config.protonEmail = variant
       addLog(`[Proton] ${isEn ? 'Using dot-variant' : '使用点号变体'}: ${variant}`)
+    } else if (mode === 'icloud') {
+      // 单次注册：从池子里 checkout 1 个，结束时如果失败标 failed
+      if (!icloudCreds.hasAppPassword || !icloudCreds.mainEmail) {
+        addLog('[iCloud HME] 主邮箱或应用专用密码未配置，已中止')
+        setPhase('idle'); return
+      }
+      try {
+        const r = await window.api.icloudHmeCheckout({ count: 1, consumedBy: 'single' })
+        const addr = r.addresses[0]
+        if (!addr) {
+          addLog('[iCloud HME] 池中无可用地址，已中止（请先在「iCloud HME」面板生成或导入）')
+          setPhase('idle'); return
+        }
+        config.useIcloudHme = true
+        config.icloudHmeAddress = addr
+        addLog(`[iCloud HME] 使用地址: ${addr}`)
+        await refreshIcloudState()
+      } catch (err) {
+        addLog(`[iCloud HME] checkout 失败: ${err instanceof Error ? err.message : String(err)}`)
+        setPhase('idle'); return
+      }
     }
 
     // 代理池注入
@@ -1533,6 +1588,14 @@ export function RegisterPage(): React.JSX.Element {
     } else {
       addLog(`${t('register.logRegFailed')} ${res.error}`)
       addHistory({ email: res.email, status: res.status, error: res.error, password: res.password, result: res })
+      // iCloud HME 单次模式：注册失败时把该地址标 failed（与批量逻辑对齐，避免下次再分配）
+      if (mode === 'icloud' && res.email && /@(?:icloud|me|mac)\.com$/i.test(res.email)) {
+        try {
+          await window.api.icloudHmeMarkFailed({ address: res.email, error: res.error || 'unknown' })
+          addLog(`[iCloud HME] 已将 ${res.email} 标记为 failed`)
+          await refreshIcloudState()
+        } catch { /* ignore */ }
+      }
       // 单次模式失败补偿：邮箱已占用时加入黑名单（与批量 runSingleWithRetry 逻辑对齐），
       // 下次 generateProtonEmail / 匿名变体经 collectUsedEmails 自动跳过
       if (res.email && classifyError(res.error) === 'email_used') {
@@ -1629,6 +1692,12 @@ export function RegisterPage(): React.JSX.Element {
   const buildAutoConfig = useCallback((): Parameters<typeof window.api.registrationStartAuto>[0] => {
     const config: Record<string, unknown> = {}
 
+    // iCloud HME 是独立模式（不参与 mixed 加权轮询）。地址池的 pop 由 runSingleWithRetry 在 task 外层
+    // 提前完成一次，重试时复用同一个地址；这里不再 pop，避免重试时 ref 已空导致 fallback 到 MoEmail。
+    if (mode === 'icloud') {
+      return config as Parameters<typeof window.api.registrationStartAuto>[0]
+    }
+
     // 混合模式：每次调用挑一个子源
     const effectiveMode: AutoEmailSource | null = mode === 'mixed'
       ? pickNextSource()
@@ -1665,7 +1734,23 @@ export function RegisterPage(): React.JSX.Element {
     taskId: string,
     maxRetries: number
   ): Promise<{ success: boolean; result?: RegResult }> => {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // iCloud 模式不重试：失败时多半是 OTP 验证（一次性、新 workflow 拒旧码）或地址被 AWS 风控，
+    // 重试同地址必失败，只浪费一个 HME 配额。前端硬覆盖为 0 比改 batchRetries 干净。
+    const effectiveRetries = mode === 'icloud' ? 0 : maxRetries
+
+    // iCloud 模式：在 task 外层只 pop 一次地址，重试时复用同一个；
+    // 否则 buildAutoConfig 在 retry 时会从 pool ref 再 pop（但批量已只 checkout N 个）拿到 undefined，
+    // 导致 useIcloudHme 没设上，后端 step3 fallback 到 MoEmail（→ "MoEmail 未配置"）。
+    let icloudAddress: string | undefined
+    if (mode === 'icloud') {
+      icloudAddress = icloudHmePoolRef.current.shift()
+      if (!icloudAddress) {
+        addLog('[iCloud HME] 池中无可用地址，跳过该任务')
+        return { success: false, result: { status: 'failed', email: '', error: '池中无可用地址' } as RegResult }
+      }
+    }
+
+    for (let attempt = 0; attempt <= effectiveRetries; attempt++) {
       // 暂停时阻塞等待恢复；停止时立即退出 —— 让暂停/停止对"重试"也即时生效
       while (batchPause.current && !batchAbort.current) {
         await new Promise((r) => setTimeout(r, 300))
@@ -1676,7 +1761,7 @@ export function RegisterPage(): React.JSX.Element {
         setBatchItems((prev) => prev.map((it) =>
           it.id === itemId ? { ...it, status: 'retrying' as BatchItemStatus, retryCount: attempt } : it
         ))
-        addLog(t('register.batchRetrying').replace('{current}', String(attempt)).replace('{max}', String(maxRetries)))
+        addLog(t('register.batchRetrying').replace('{current}', String(attempt)).replace('{max}', String(effectiveRetries)))
         // 可中断的重试等待（每 100ms 检查一次 abort，最多 3s）
         for (let w = 0; w < 30 && !batchAbort.current; w++) {
           await new Promise((r) => setTimeout(r, 100))
@@ -1691,6 +1776,12 @@ export function RegisterPage(): React.JSX.Element {
       // 每次都重新 build：混合模式下每个 task / 每次重试都独立挑源（权重正确生效）
       const config = buildAutoConfig()
       const enrichedConfig: Record<string, unknown> = { ...config, taskId }
+
+      // iCloud 模式：把 task 外层 pop 出来的地址注入到每次 attempt 的 config，重试也用同一个
+      if (icloudAddress) {
+        enrichedConfig.useIcloudHme = true
+        enrichedConfig.icloudHmeAddress = icloudAddress
+      }
 
       // Outlook 模式：从 shuffle 后的池里取单行（不同 task 不会抢同一个邮箱）
       // 池空时回退到完整列表（主进程 random pick，兼容兜底）
@@ -1740,15 +1831,15 @@ export function RegisterPage(): React.JSX.Element {
         if (regResult.status === 'success') {
           return { success: true, result: regResult }
         }
-        if (attempt === maxRetries) {
+        if (attempt === effectiveRetries) {
           return { success: false, result: regResult }
         }
       } else if (!res.success) {
-        if (attempt === maxRetries) return { success: false }
+        if (attempt === effectiveRetries) return { success: false }
       }
     }
     return { success: false }
-  }, [addLog, t, proxyPool, proxyPoolConfig.enabled, pickNextProxy, reportProxyResult, buildAutoConfig])
+  }, [addLog, t, proxyPool, proxyPoolConfig.enabled, pickNextProxy, reportProxyResult, buildAutoConfig, mode])
 
   // 处理单个批量注册任务完成
   const handleBatchOutcome = async (
@@ -1796,6 +1887,13 @@ export function RegisterPage(): React.JSX.Element {
         addHistory({ email: errEmail, status: 'failed', error: errMsg })
       }
       const errCategory = classifyError(errMsg)
+      // iCloud HME 模式：注册失败 → 把该地址标 failed 防再分配
+      if (mode === 'icloud' && errEmail && /@(?:icloud|me|mac)\.com$/i.test(errEmail)) {
+        try {
+          await window.api.icloudHmeMarkFailed({ address: errEmail, error: errMsg })
+          addLog(`[iCloud HME] 已将 ${errEmail} 标记为 failed`)
+        } catch { /* ignore */ }
+      }
       // 经验型预校验：邮箱已占用错误加入黑名单
       if (errEmail && errCategory === 'email_used') {
         const set = loadEmailBlacklist()
@@ -1877,7 +1975,7 @@ export function RegisterPage(): React.JSX.Element {
     }
 
     const concurrency = Math.max(1, batchConcurrency)
-    const totalCount = items.length
+    let totalCount = items.length
 
     // 初始化 Outlook 单行池（avoid 并发抢占）—— 仅当 outlook / mixed 启用且填了 outlookData
     const needsOutlook = mode === 'outlook' || (mode === 'mixed' && mixedEnabledSources.includes('outlook'))
@@ -1896,6 +1994,40 @@ export function RegisterPage(): React.JSX.Element {
       }
     } else {
       outlookPoolRef.current = []
+    }
+
+    // iCloud HME：批量启动前一次性 checkout N 个地址，每个 task pop 一个
+    // 不足时缩减 totalCount；失败的地址在 handleBatchOutcome 标 failed；剩余未用的在停止/完成时归还
+    if (mode === 'icloud') {
+      if (!icloudCreds.hasAppPassword || !icloudCreds.mainEmail) {
+        addLog('[iCloud HME] 主邮箱或应用专用密码未配置，已中止')
+        setBatchRunning(false); setPhase('idle'); return
+      }
+      try {
+        const r = await window.api.icloudHmeCheckout({
+          count: totalCount,
+          consumedBy: `batch-${Date.now().toString(36)}`
+        })
+        if (r.addresses.length === 0) {
+          addLog('[iCloud HME] 池中没有可用地址，已中止（请先在「iCloud HME」面板生成或导入）')
+          setBatchRunning(false); setPhase('idle'); return
+        }
+        if (r.addresses.length < totalCount) {
+          addLog(`[iCloud HME] 池中仅 ${r.addresses.length} 个可用地址，本批 ${totalCount} 个任务，已自动缩减`)
+          // 截断 items 保持引用一致
+          items = items.slice(0, r.addresses.length)
+          setBatchItems((prev) => prev.slice(0, r.addresses.length))
+          totalCount = items.length
+        }
+        icloudHmePoolRef.current = [...r.addresses]
+        addLog(`[iCloud HME] 已 checkout ${r.addresses.length} 个地址`)
+        await refreshIcloudState()
+      } catch (err) {
+        addLog(`[iCloud HME] checkout 失败: ${err instanceof Error ? err.message : String(err)}`)
+        setBatchRunning(false); setPhase('idle'); return
+      }
+    } else {
+      icloudHmePoolRef.current = []
     }
 
     setPhase('running')
@@ -2005,6 +2137,16 @@ export function RegisterPage(): React.JSX.Element {
 
     // 等待所有正在执行的任务完成
     await Promise.all(executing)
+
+    // iCloud HME：释放未用上的地址（用户中途停止 / 池缩减后留有富余）
+    if (icloudHmePoolRef.current.length > 0) {
+      const leftover = icloudHmePoolRef.current.splice(0, icloudHmePoolRef.current.length)
+      try {
+        const r = await window.api.icloudHmeRelease({ addresses: leftover })
+        if (r.released > 0) addLog(`[iCloud HME] 已释放 ${r.released} 个未用地址`)
+        await refreshIcloudState()
+      } catch { /* ignore */ }
+    }
 
     setBatchRunning(false)
     setIsPaused(false)
@@ -2149,12 +2291,13 @@ export function RegisterPage(): React.JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex gap-1 p-1 bg-muted rounded-lg w-fit">
+          <div className="flex gap-1 p-1 bg-muted rounded-lg w-fit flex-wrap">
             {([
               ['manual', t('register.manual')],
               ['outlook', 'Outlook'],
               ['tempmail', t('register.tempmail')],
               ['proton', 'Proton'],
+              ['icloud', 'iCloud HME'],
               ['mixed', isEn ? 'Mixed' : '混合']
             ] as [RegMode, string][]).map(([m, label]) => (
               <button
@@ -2436,6 +2579,276 @@ export function RegisterPage(): React.JSX.Element {
               </p>
             </div>
           )}
+
+          {/* iCloud Hide My Email 配置 + 池管理 */}
+          {mode === 'icloud' && (
+            <div className="p-4 bg-muted/30 rounded-lg border border-dashed space-y-4">
+              {/* 凭据：cookie / 主邮箱 / 应用专用密码 */}
+              <div className="space-y-2">
+                <Label className="text-xs">{isEn ? 'iCloud cookie (header string from Cookie Editor)' : 'iCloud cookie（Cookie Editor 导出的 Header String）'}</Label>
+                <textarea
+                  value={icloudCookieInput}
+                  onChange={(e) => setIcloudCookieInput(e.target.value)}
+                  placeholder={icloudCreds.hasCookie ? icloudCreds.cookiePreview : 'X-APPLE-WEBAUTH-USER="...";X-APPLE-WEBAUTH-VALIDATE="...";...'}
+                  rows={3}
+                  spellCheck={false}
+                  disabled={isRunning || batchRunning}
+                  className="w-full text-xs font-mono px-2 py-1.5 rounded border border-input bg-background resize-y"
+                />
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  {isEn
+                    ? 'Leave empty to keep the saved cookie. Cookie is encrypted in the local store and only used to call Apple HME generate/reserve. Required for "Generate" pool action.'
+                    : '留空保留已保存的 cookie。Cookie 加密存储在本地，仅用于调 Apple HME 的 generate/reserve。仅"生成"操作需要。'}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">{isEn ? 'iCloud main email (IMAP user)' : 'iCloud 主邮箱（IMAP 用户名）'}</Label>
+                  <Input
+                    type="email"
+                    value={icloudMainEmailInput}
+                    onChange={(e) => setIcloudMainEmailInput(e.target.value)}
+                    placeholder="you@icloud.com"
+                    autoComplete="off"
+                    disabled={isRunning || batchRunning}
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">{isEn ? 'App-specific password' : '应用专用密码'}</Label>
+                  <Input
+                    type="password"
+                    value={icloudAppPasswordInput}
+                    onChange={(e) => setIcloudAppPasswordInput(e.target.value)}
+                    placeholder={icloudCreds.hasAppPassword ? '●●●●-●●●●-●●●●-●●●● (saved)' : 'xxxx-xxxx-xxxx-xxxx'}
+                    autoComplete="off"
+                    disabled={isRunning || batchRunning}
+                    className="font-mono text-xs"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={icloudWorking}
+                  onClick={async () => {
+                    setIcloudWorking(true)
+                    try {
+                      const r = await window.api.icloudHmeSaveCreds({
+                        cookie: icloudCookieInput || undefined,  // undefined = 不覆盖
+                        mainEmail: icloudMainEmailInput,
+                        appPassword: icloudAppPasswordInput || undefined
+                      })
+                      if (r.success) {
+                        setIcloudCreds(r.redacted)
+                        setIcloudCookieInput('')   // 清空输入框，避免再次保存覆盖
+                        setIcloudAppPasswordInput('')
+                        addLog(isEn ? '[iCloud HME] Credentials saved' : '[iCloud HME] 凭据已保存')
+                      } else {
+                        addLog(`[iCloud HME] ${r.error || 'save failed'}`)
+                      }
+                    } finally {
+                      setIcloudWorking(false)
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-md border border-primary bg-primary/10 text-primary text-xs font-medium transition-colors hover:bg-primary/20 disabled:opacity-50"
+                >
+                  {isEn ? 'Save credentials' : '保存凭据'}
+                </button>
+                <button
+                  type="button"
+                  disabled={icloudWorking || !icloudCreds.hasCookie}
+                  onClick={async () => {
+                    setIcloudWorking(true)
+                    try {
+                      const r = await window.api.icloudHmeTestCookie()
+                      addLog(r.success
+                        ? `[iCloud HME] cookie 有效，账户已有 ${r.existingCount} 个 HME`
+                        : `[iCloud HME] cookie 无效: ${r.error}`)
+                    } finally {
+                      setIcloudWorking(false)
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-md border border-border text-xs transition-colors hover:border-primary/50 disabled:opacity-50"
+                >
+                  {isEn ? 'Test cookie' : '测 cookie'}
+                </button>
+                <button
+                  type="button"
+                  disabled={icloudWorking || !icloudCreds.hasAppPassword || !icloudCreds.mainEmail}
+                  onClick={async () => {
+                    setIcloudWorking(true)
+                    try {
+                      const r = await window.api.icloudHmeTestImap()
+                      addLog(r.success
+                        ? `[iCloud HME] IMAP 登录成功，收件箱 ${r.mailboxCount} 封`
+                        : `[iCloud HME] IMAP 失败: ${r.error}`)
+                    } finally {
+                      setIcloudWorking(false)
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-md border border-border text-xs transition-colors hover:border-primary/50 disabled:opacity-50"
+                >
+                  {isEn ? 'Test IMAP' : '测 IMAP'}
+                </button>
+                <span className="text-[11px] text-muted-foreground">
+                  cookie {icloudCreds.hasCookie ? '✓' : '×'} · IMAP pwd {icloudCreds.hasAppPassword ? '✓' : '×'}
+                </span>
+              </div>
+
+              {/* 池统计 + 操作 */}
+              <div className="rounded-md border border-border bg-background/50 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="text-xs flex items-center gap-3 flex-wrap">
+                    <span><strong>{isEn ? 'Pool' : '池子'}</strong>:</span>
+                    <span>{isEn ? 'Total' : '总数'} <strong className="font-mono">{icloudPoolStats.total}</strong></span>
+                    <span className="text-green-600">{isEn ? 'Free' : '可用'} <strong className="font-mono">{icloudPoolStats.free}</strong></span>
+                    <span className="text-muted-foreground">{isEn ? 'Consumed' : '已用'} <strong className="font-mono">{icloudPoolStats.consumed}</strong></span>
+                    <span className="text-red-500">{isEn ? 'Failed' : '失败'} <strong className="font-mono">{icloudPoolStats.failed}</strong></span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={icloudWorking}
+                    onClick={async () => { await refreshIcloudState() }}
+                    className="text-[11px] px-2 py-0.5 rounded border border-border hover:border-primary/50 disabled:opacity-50"
+                  >
+                    {isEn ? 'Refresh' : '刷新'}
+                  </button>
+                </div>
+
+                {/* 生成 + 导入 + 同步 */}
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={icloudGenCount}
+                    onChange={(e) => setIcloudGenCount(Math.max(1, Math.min(200, parseInt(e.target.value || '1', 10))))}
+                    disabled={icloudWorking}
+                    className="w-20 h-8 text-xs"
+                  />
+                  <button
+                    type="button"
+                    disabled={icloudWorking || !icloudCreds.hasCookie}
+                    onClick={async () => {
+                      setIcloudWorking(true)
+                      try {
+                        addLog(`[iCloud HME] ${isEn ? 'Generating' : '正在生成'} ${icloudGenCount} ...`)
+                        const r = await window.api.icloudHmeGenerate({ count: icloudGenCount, concurrency: 2 })
+                        addLog(`[iCloud HME] ${isEn ? 'Generated' : '已生成'} ${r.generated.length}${r.failed > 0 ? `, ${isEn ? 'stopped at' : '止于'} ${r.failed} ${isEn ? 'failure' : '次失败'}: ${r.error}` : ''}`)
+                        await refreshIcloudState()
+                      } finally {
+                        setIcloudWorking(false)
+                      }
+                    }}
+                    className="px-3 py-1 rounded-md border border-primary bg-primary/10 text-primary text-xs transition-colors hover:bg-primary/20 disabled:opacity-50"
+                    title={isEn ? 'Calls Apple HME generate+reserve. Apple rate-limits ~5/30min/family member, ~700 total.' : '调 Apple HME generate+reserve。Apple 限速约 5/30 分钟/家庭成员，总量约 700。'}
+                  >
+                    {isEn ? 'Generate' : '生成'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={icloudWorking || !icloudCreds.hasCookie}
+                    onClick={async () => {
+                      setIcloudWorking(true)
+                      try {
+                        const r = await window.api.icloudHmeSyncFromApple()
+                        addLog(r.success
+                          ? `[iCloud HME] ${isEn ? 'Synced from Apple, added' : '从 Apple 同步，新增'} ${r.added}/${r.total}`
+                          : `[iCloud HME] sync failed: ${r.error}`)
+                        await refreshIcloudState()
+                      } finally {
+                        setIcloudWorking(false)
+                      }
+                    }}
+                    className="px-3 py-1 rounded-md border border-border text-xs transition-colors hover:border-primary/50 disabled:opacity-50"
+                    title={isEn ? 'Sync existing Apple HME list into this pool' : '把 Apple 上现有的 HME 列表同步入池'}
+                  >
+                    {isEn ? 'Sync from Apple' : '从 Apple 同步'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={icloudWorking || icloudPoolStats.failed === 0}
+                    onClick={async () => {
+                      setIcloudWorking(true)
+                      try {
+                        const r = await window.api.icloudHmeResetFailed()
+                        addLog(`[iCloud HME] ${isEn ? 'Reset' : '已重置'} ${r.count} failed → free`)
+                        await refreshIcloudState()
+                      } finally {
+                        setIcloudWorking(false)
+                      }
+                    }}
+                    className="px-3 py-1 rounded-md border border-border text-xs transition-colors hover:border-primary/50 disabled:opacity-50"
+                  >
+                    {isEn ? 'Reset failed' : '重置失败'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={icloudWorking || icloudPoolStats.total === 0}
+                    onClick={async () => {
+                      if (!confirm(isEn ? 'Clear the entire iCloud HME pool? This is local-only; addresses on Apple side are NOT deactivated.' : '清空整个 iCloud HME 池？仅清理本地记录，Apple 侧不会停用。')) return
+                      setIcloudWorking(true)
+                      try {
+                        await window.api.icloudHmeClear()
+                        addLog(`[iCloud HME] ${isEn ? 'Pool cleared' : '池已清空'}`)
+                        await refreshIcloudState()
+                      } finally {
+                        setIcloudWorking(false)
+                      }
+                    }}
+                    className="px-3 py-1 rounded-md border border-red-500/40 text-red-500 text-xs transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                  >
+                    {isEn ? 'Clear pool' : '清空池'}
+                  </button>
+                </div>
+
+                {/* 文本导入 */}
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                    {isEn ? 'Import addresses from text' : '从文本导入地址'}
+                  </summary>
+                  <div className="pt-2 space-y-2">
+                    <textarea
+                      value={icloudImportText}
+                      onChange={(e) => setIcloudImportText(e.target.value)}
+                      placeholder="abc123@icloud.com&#10;xyz456@icloud.com&#10;..."
+                      rows={4}
+                      spellCheck={false}
+                      disabled={icloudWorking}
+                      className="w-full text-xs font-mono px-2 py-1.5 rounded border border-input bg-background resize-y"
+                    />
+                    <button
+                      type="button"
+                      disabled={icloudWorking || !icloudImportText.trim()}
+                      onClick={async () => {
+                        setIcloudWorking(true)
+                        try {
+                          const r = await window.api.icloudHmeImport({ text: icloudImportText })
+                          addLog(`[iCloud HME] ${isEn ? 'Imported' : '已导入'} ${r.added}/${r.total} (${isEn ? 'ignored' : '忽略'} ${r.ignored})`)
+                          setIcloudImportText('')
+                          await refreshIcloudState()
+                        } finally {
+                          setIcloudWorking(false)
+                        }
+                      }}
+                      className="px-3 py-1 rounded-md border border-primary bg-primary/10 text-primary text-xs transition-colors hover:bg-primary/20 disabled:opacity-50"
+                    >
+                      {isEn ? 'Import' : '导入'}
+                    </button>
+                  </div>
+                </details>
+              </div>
+
+              <p className="text-xs text-muted-foreground leading-snug">
+                {isEn
+                  ? 'Each registration consumes one HME from the pool. Failed addresses are marked failed (not reused; click "Reset failed" to recover). Concurrency works fine — IMAP only reads, doesn\'t modify state.'
+                  : '每次注册消耗池里一个 HME。注册失败的地址标 failed 不再分配（"重置失败"按钮可救援）。支持并发，IMAP 只读不改邮件状态。'}
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -2640,7 +3053,8 @@ export function RegisterPage(): React.JSX.Element {
                 onClick={mode === 'manual' ? startManual : startAuto}
                 disabled={
                   (mode === 'outlook' && !outlookData.trim()) ||
-                  (mode === 'tempmail' && (!tempMailDomain.trim() || !tempMailEmail.trim() || !tempMailEpin.trim()))
+                  (mode === 'tempmail' && (!tempMailDomain.trim() || !tempMailEmail.trim() || !tempMailEpin.trim())) ||
+                  (mode === 'icloud' && (!icloudCreds.hasAppPassword || !icloudCreds.mainEmail || icloudPoolStats.free === 0))
                 }
               >
                 <Play className="h-4 w-4 mr-2" />
