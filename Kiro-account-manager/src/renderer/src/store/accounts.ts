@@ -1383,6 +1383,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     const accountsToRefresh: Array<{
       id: string
       email: string
+      profileArn?: string
       credentials: {
         refreshToken: string
         clientId?: string
@@ -1390,6 +1391,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         region?: string
         authMethod?: string
         accessToken?: string
+        provider?: string
+        profileArn?: string
       }
     }> = []
 
@@ -1400,13 +1403,16 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       accountsToRefresh.push({
         id,
         email: account.email,
+        profileArn: account.profileArn,
         credentials: {
           refreshToken: account.credentials.refreshToken,
           clientId: account.credentials.clientId,
           clientSecret: account.credentials.clientSecret,
           region: account.credentials.region,
           authMethod: account.credentials.authMethod,
-          accessToken: account.credentials.accessToken
+          accessToken: account.credentials.accessToken,
+          provider: account.credentials.provider || account.idp,
+          profileArn: account.credentials.profileArn
         }
       })
     }
@@ -2360,6 +2366,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       id: string
       email: string
       idp?: string
+      profileArn?: string
       needsTokenRefresh: boolean
       machineId?: string  // 账户绑定的设备 ID
       credentials: {
@@ -2370,6 +2377,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         authMethod?: string
         accessToken?: string
         provider?: string
+        profileArn?: string
       }
     }> = []
     
@@ -2389,6 +2397,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           id,
           email: account.email,
           idp: account.idp,
+          profileArn: account.profileArn,
           needsTokenRefresh: !!needsTokenRefresh,
           machineId: account.machineId,  // 传递账户绑定的设备 ID
           credentials: {
@@ -2398,7 +2407,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
             region: account.credentials.region,
             authMethod: account.credentials.authMethod,
             accessToken: account.credentials.accessToken,
-            provider: account.credentials.provider
+            provider: account.credentials.provider,
+            profileArn: account.credentials.profileArn
           }
         })
       }
@@ -2448,6 +2458,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         accessToken?: string
         refreshToken?: string
         expiresIn?: number
+        profileArn?: string
         usage?: {
           current?: number
           limit?: number
@@ -2479,13 +2490,17 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       const newStatus = refreshData?.status === 'error' ? 'error' as AccountStatus : 'active' as AccountStatus
       const newError = refreshData?.errorMessage
 
+      // 后台刷新时主进程可能返回自动获取的 profileArn，持久化到顶层和 credentials
+      const bgProfileArn = refreshData?.profileArn || account.credentials.profileArn || account.profileArn
       accounts.set(id, {
         ...account,
+        ...(bgProfileArn ? { profileArn: bgProfileArn } : {}),
         credentials: {
           ...account.credentials,
           accessToken: refreshData?.accessToken || account.credentials.accessToken,
           refreshToken: refreshData?.refreshToken || account.credentials.refreshToken,
-          expiresAt: refreshData?.expiresIn ? now + refreshData.expiresIn * 1000 : account.credentials.expiresAt
+          expiresAt: refreshData?.expiresIn ? now + refreshData.expiresIn * 1000 : account.credentials.expiresAt,
+          ...(bgProfileArn ? { profileArn: bgProfileArn } : {})
         },
         usage: refreshData?.usage ? (() => {
           const newCurrent = refreshData.usage.current ?? account.usage.current

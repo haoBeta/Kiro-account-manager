@@ -194,8 +194,9 @@ function buildClientModel(input: {
   const outputModalities: ModelModality[] = ['text']
   const output = modelOutputLimit(input.id, input.maxOutputTokens)
   const context = typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? input.maxInputTokens : 200000
-  const reasoning = false
-  const interleaved = false
+  const hasThinking = !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config
+  const reasoning = hasThinking
+  const interleaved = hasThinking ? { field: 'reasoning_content' as const } : false
 
   return {
     id: input.id,

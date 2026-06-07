@@ -251,15 +251,20 @@ async function configureClaudeCode(context: ProxyClientContext): Promise<Omit<Pr
 
 function openCodeModelConfig(model: ProxyClientModel): Record<string, unknown> {
   const modalities = inputModalities(model)
+  // opencode 1.15+ 使用 Effect Schema 严格校验：
+  //   limit.context / limit.output 必须是有限数字（Schema.Finite，不接受 null/Infinity）
+  //   modalities.input/output 必须是 "text"|"audio"|"image"|"video"|"pdf" 枚举
+  const ctx = contextLimit(model)
+  const out = outputLimit(model)
   return {
     name: model.name || model.id,
     attachment: modalities.some(item => item !== 'text'),
-    reasoning: false,
+    reasoning: true,
     temperature: true,
     tool_call: true,
     limit: {
-      context: contextLimit(model),
-      output: outputLimit(model)
+      context: Number.isFinite(ctx) ? ctx : 200000,
+      output: Number.isFinite(out) ? out : 16384
     },
     modalities: {
       input: modalities,

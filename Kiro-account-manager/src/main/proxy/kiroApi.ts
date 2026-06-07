@@ -1243,11 +1243,11 @@ export async function callKiroApiStream(
   preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
 ): Promise<void> {
   const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
-  // Enterprise 账号只能走 CodeWhisperer 端点（AmazonQ 端点对 Enterprise IdC 返回 400/403）
-  const endpoints = getSortedEndpoints(isEnterprise ? 'codewhisperer' : preferredEndpoint)
+  // 所有账号类型均走正常端点优先级（含 fallback），不再强制 Enterprise 走 CodeWhisperer
+  const endpoints = getSortedEndpoints(preferredEndpoint)
 
-  // 所有账号类型：缺真实 profileArn 时尝试自动获取并持久化。失败时 resolveProfileArn 会返回备用 ARN。
-  if (!account.profileArn || isPlaceholderProfileArn(account.profileArn)) {
+  // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底，流式端点自动不传占位符）
+  if (!account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
     if (fetchedArn) {
       account.profileArn = fetchedArn
@@ -1261,15 +1261,11 @@ export async function callKiroApiStream(
     try {
       throwIfAborted(signal)
       const requestPayload = clonePayload(payload)
-      // profileArn 决策：
-      //   - Enterprise/IdC 账号有真实 ARN → 必须传（否则 403）
-      //   - BuilderId 占位符 ARN 在流式端点会 403 → 不传
-      //   - Social 固定 ARN → 传
+      // profileArn 决策：后端所有端点均强制要求 profileArn（400 "profileArn is required"）
+      // resolveProfileArn 按账号类型返回：BuilderId→占位符 / Social→固定 / Enterprise→真实ARN
       const resolvedArn = resolveProfileArn(account)
-      if (resolvedArn && (!isPlaceholderProfileArn(resolvedArn) || isEnterprise)) {
+      if (resolvedArn) {
         requestPayload.profileArn = resolvedArn
-      } else {
-        delete requestPayload.profileArn
       }
       const requestedModelId = getPayloadModelId(requestPayload)
       if (endpoint.name === 'CodeWhisperer') {
@@ -2094,6 +2090,9 @@ export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<
     'amz-sdk-request': 'attempt=1; max=1'
   }
 
+  // 获取该账号类型对应的备用 ARN（403 时兜底，避免每次请求都重复尝试）
+  const fallbackArn = resolveProfileArn(account)
+
   try {
     const response = await fetchWithProxy(url, {
       method: 'POST',
@@ -2104,6 +2103,11 @@ export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<
     if (!response.ok) {
       const errBody = await response.text().catch(() => '')
       console.error(`[KiroAPI] ListAvailableProfiles failed: ${response.status}`, errBody.slice(0, 200))
+      // 403 = 无权限（BuilderId/Social 账号不支持此 API）→ 返回备用 ARN 作为缓存，不再重复尝试
+      if (response.status === 403 && fallbackArn) {
+        console.log(`[KiroAPI] Using fallback profileArn for ${account.provider || 'unknown'}: ${fallbackArn}`)
+        return fallbackArn
+      }
       return undefined
     }
 
@@ -2142,15 +2146,14 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
   const allModels: KiroModel[] = []
   let nextToken: string | undefined
 
-  // 所有账号类型：优先使用自动获取的真实 profileArn，失败时 resolveProfileArn 返回备用固定 ARN。
-  // 若账号尚未存储真实 ARN（如旧版本添加或占位符），尝试调 ListAvailableProfiles 获取并持久化。
-  if (!account.profileArn || isPlaceholderProfileArn(account.profileArn)) {
+  // Enterprise 缺 profileArn 时调 API 获取；BuilderId/Social 不需要（resolveProfileArn 会兜底）
+  const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
+  if (!account.profileArn && isEnterprise) {
     const fetchedArn = await fetchEnterpriseProfileArn(account)
     if (fetchedArn) {
       account.profileArn = fetchedArn
       if (account.id) profileArnPersistCallback?.(account.id, fetchedArn)
     }
-    // 获取失败时不阻塞，resolveProfileArn 会返回对应类型的备用 ARN
   }
 
   try {

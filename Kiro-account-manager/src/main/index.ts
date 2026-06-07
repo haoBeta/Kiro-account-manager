@@ -2082,21 +2082,28 @@ function createWindow(): void {
 
           const proxyAccounts = Object.values(accountData.accounts)
             .filter((acc: any) => acc.status === 'active' && acc.credentials?.accessToken)
-            .map((acc: any) => ({
-              id: acc.id,
-              email: acc.email,
-              accessToken: acc.credentials.accessToken,
-              refreshToken: acc.credentials?.refreshToken,
-              profileArn: acc.profileArn,
-              expiresAt: acc.credentials?.expiresAt,
-              machineId: acc.machineId,
-              clientId: acc.credentials?.clientId,
-              clientSecret: acc.credentials?.clientSecret,
-              region: acc.credentials?.region || 'us-east-1',
-              authMethod: acc.credentials?.authMethod,
-              provider: acc.credentials?.provider || acc.idp,
-              proxyUrl: buildProxyUrl(acc.id)
-            }))
+            .map((acc: any) => {
+              const provider = acc.credentials?.provider || acc.idp
+              const authMethod = acc.credentials?.authMethod
+              const profileArn = acc.profileArn || acc.credentials?.profileArn
+              // BuilderId/Social 不需要预填 profileArn（resolveProfileArn 会兜底，流式端点自动不传占位符）
+              // Enterprise 留给自愈获取真实 ARN
+              return {
+                id: acc.id,
+                email: acc.email,
+                accessToken: acc.credentials.accessToken,
+                refreshToken: acc.credentials?.refreshToken,
+                profileArn,
+                expiresAt: acc.credentials?.expiresAt,
+                machineId: acc.machineId,
+                clientId: acc.credentials?.clientId,
+                clientSecret: acc.credentials?.clientSecret,
+                region: acc.credentials?.region || 'us-east-1',
+                authMethod,
+                provider,
+                proxyUrl: buildProxyUrl(acc.id)
+              }
+            })
           if (proxyAccounts.length > 0) {
             const pool = server.getAccountPool()
             pool.clear()
@@ -2906,25 +2913,29 @@ app.whenReady().then(async () => {
         console.warn('[Refresh] Failed to sync token to IDE:', e)
       }
 
-      // 所有账号类型：刷新后自动获取 profileArn（如果缺失）
+      // 刷新后自动获取 profileArn（仅 Enterprise 需要调 API，其他类型不调）
       let resolvedEnterpriseArn: string | undefined
       const existingProfileArn = account.profileArn || account.credentials?.profileArn
       if (!existingProfileArn) {
-        try {
-          resolvedEnterpriseArn = await fetchEnterpriseProfileArn({
-            id: account.id || '',
-            accessToken: newAccess,
-            region: region || 'us-east-1',
-            provider,
-            authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined,
-            machineId: account.machineId
-          })
-          if (resolvedEnterpriseArn) {
-            console.log(`[Refresh] profileArn auto-resolved: ${resolvedEnterpriseArn}`)
+        const isEnt = provider === 'Enterprise' || authMethod === 'external_idp'
+        if (isEnt) {
+          try {
+            resolvedEnterpriseArn = await fetchEnterpriseProfileArn({
+              id: account.id || '',
+              accessToken: newAccess,
+              region: region || 'us-east-1',
+              provider,
+              authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined,
+              machineId: account.machineId
+            })
+            if (resolvedEnterpriseArn) {
+              console.log(`[Refresh] Enterprise profileArn auto-resolved: ${resolvedEnterpriseArn}`)
+            }
+          } catch (e) {
+            console.warn('[Refresh] Failed to fetch Enterprise profileArn:', e)
           }
-        } catch (e) {
-          console.warn('[Refresh] Failed to fetch profileArn:', e)
         }
+        // BuilderId/Social 不调 API，不需要返回 profileArn（反代自愈时用 resolveProfileArn 兜底）
       }
 
       return {
@@ -3460,6 +3471,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('background-batch-refresh', async (_event, accounts: Array<{
     id: string
     idp?: string
+    profileArn?: string
     needsTokenRefresh?: boolean
     machineId?: string  // 账户绑定的设备 ID
     credentials: {
@@ -3470,6 +3482,7 @@ app.whenReady().then(async () => {
       authMethod?: string
       accessToken?: string
       provider?: string
+      profileArn?: string
     }
   }>, concurrency: number = 10, syncInfo: boolean = true) => {
     console.log(`[BackgroundRefresh] Starting batch refresh for ${accounts.length} accounts, concurrency: ${concurrency}, syncInfo: ${syncInfo}`)
@@ -3577,6 +3590,28 @@ app.whenReady().then(async () => {
                 } catch (e) {
                   console.warn(`[BackgroundRefresh] sync to IDE failed for ${account.id}:`, e)
                 }
+              }
+            }
+
+            // Enterprise 账号：后台刷新后自动获取 profileArn（BuilderId/Social 不需要调 API）
+            const existingProfileArn = account.profileArn || account.credentials?.profileArn
+            let resolvedBgProfileArn: string | undefined
+            const isEnt = (provider || account.idp) === 'Enterprise' || authMethod === 'external_idp'
+            if (!existingProfileArn && newAccessToken && isEnt) {
+              try {
+                resolvedBgProfileArn = await fetchEnterpriseProfileArn({
+                  id: account.id || '',
+                  accessToken: newAccessToken,
+                  region: region || 'us-east-1',
+                  provider: provider || account.idp,
+                  authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined,
+                  machineId: account.machineId
+                })
+                if (resolvedBgProfileArn) {
+                  console.log(`[BackgroundRefresh] Enterprise profileArn auto-resolved: ${resolvedBgProfileArn} (${account.id})`)
+                }
+              } catch (e) {
+                console.warn(`[BackgroundRefresh] Failed to fetch Enterprise profileArn for ${account.id}:`, e)
               }
             }
 
@@ -3778,6 +3813,7 @@ app.whenReady().then(async () => {
                 accessToken: newAccessToken,
                 refreshToken: newRefreshToken,
                 expiresIn: newExpiresIn,
+                profileArn: resolvedBgProfileArn || undefined,
                 usage: parsedUsage,
                 subscription: subscriptionData,
                 userInfo: syncInfo ? userInfoData : undefined,
@@ -4346,9 +4382,10 @@ app.whenReady().then(async () => {
       
       console.log('[Verify] Success! Email:', email)
 
-      // 所有账号类型：验证时自动获取 profileArn
+      // Enterprise 账号：验证时自动获取 profileArn（BuilderId/Social 不需要调 API）
       let enterpriseProfileArn: string | undefined
-      {
+      const isEnt = provider === 'Enterprise' || authMethod === 'external_idp'
+      if (isEnt) {
         try {
           enterpriseProfileArn = await fetchEnterpriseProfileArn({
             id: '',
@@ -4358,10 +4395,10 @@ app.whenReady().then(async () => {
             authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined
           })
           if (enterpriseProfileArn) {
-            console.log(`[Verify] profileArn auto-resolved: ${enterpriseProfileArn}`)
+            console.log(`[Verify] Enterprise profileArn auto-resolved: ${enterpriseProfileArn}`)
           }
         } catch (e) {
-          console.warn('[Verify] Failed to fetch profileArn:', e)
+          console.warn('[Verify] Failed to fetch Enterprise profileArn:', e)
         }
       }
       
